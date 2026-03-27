@@ -149,7 +149,7 @@ python evaluate.py \
 @article{pdfa2025,
   title  = {Prompt-Driven Feature Adaptation for
              Vision-Language Few-Shot Learning},
-  author = {Your Name},
-  year   = {2025}
+  author = {Feidu Akmel, Xun Gong},
+  year   = {2026}
 }
 ```
