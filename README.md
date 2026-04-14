@@ -10,7 +10,7 @@ pdfa/
 ├── config.py                      # All hyperparameters and CLI arguments
 ├── pretrain.py                    # Stage 1: pre-train Z_mu on base classes
 ├── train.py                       # Stage 2: episodic training of PDFA
-├── evaluate.py                    # Stage 3: final test evaluation
+├── evaluation.py                    # Stage 3: final test evaluation
 ├── requirements.txt
 │
 ├── models/
@@ -23,9 +23,8 @@ pdfa/
 │
 ├── datasets/
 │   ├── __init__.py
-│   ├── base_dataset.py            # FewShotDataset base + EpisodeSampler
-│   └── few_shot_datasets.py       # MiniImageNet, TieredImageNet,
-│                                  # CIFARFS, CUB200, get_dataset()
+│   ├── dataset.py            # FewShotDataset base + EpisodeSampler
+│  
 │
 └── utils/
     ├── __init__.py
