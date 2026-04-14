@@ -1,260 +1,440 @@
-"""
-train.py
-========
-Stage 2: Episodic training of PDFA.
-Z_mu must be pre-trained and saved before running this script.
-
-Usage:
-    python train.py --dataset miniImageNet --data_root ./data \
-                    --backbone ViT-B/32 --K_shot 1 \
-                    --pretrain_ckpt ./checkpoints/Zmu_best.pth
-"""
-
-import os
+""" # train.py
 import torch
 import torch.nn.functional as F
+from tqdm import tqdm
+import os
 
-from config import get_config
-from datasets import get_dataset, EpisodeSampler
+from config import config
 from models.pdfa import PDFA
-from utils import (
-    set_seed, get_logger,
-    save_checkpoint, load_checkpoint,
-    load_clip, build_class_token_dict,
-    MetricLogger, print_model_summary,
-)
+from data.dataset import FewShotDataset, episodic_sampler, get_transforms
+from utils.utils import compute_alignment_loss, accuracy
 
 
-def train_one_epoch(
-    model, clip_model, sampler, class_token_dict,
-    optimizer, device, n_episodes, logger, epoch,
-):
-    """Run one epoch of episodic training."""
-    model.train()
-    metrics = MetricLogger()
+def train():
+    device = torch.device(config.device if torch.cuda.is_available() else "cpu")
+    print(f"Training PDFA on device: {device}")
 
-    for ep in range(n_episodes):
-        s_imgs, q_imgs, q_labels, ep_cls = \
-            sampler.get_episode_tensors(device)
+    # ==================== Datasets & Transforms ====================
+    # Use image_size=32 for CIFAR-FS (original resolution is 32x32)
+    transform = get_transforms(dataset_name="cifar_fs", image_size=224)
 
-        # gather class tokens for this episode
-        c_tokens = torch.stack(
-            [class_token_dict[c] for c in ep_cls]
-        ).to(device)
+    train_dataset = FewShotDataset(
+        root=config.data_root,
+        dataset_name="cifar_fs",
+        split="train",
+        transform=transform
+    )
 
-        logits, loss = model(
-            clip_model, s_imgs, q_imgs, c_tokens, q_labels
-        )
+    val_dataset = FewShotDataset(
+        root=config.data_root,
+        dataset_name="cifar_fs",
+        split="val",
+        transform=transform
+    )
 
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            model.get_trainable_params(), max_norm=1.0
-        )
-        optimizer.step()
+    # ==================== Model & Optimizer ====================
+    model = PDFA(config).to(device)
+    
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=config.lr,
+        weight_decay=config.weight_decay
+    )
+    
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.epochs)
 
-        acc = (logits.argmax(dim=1) == q_labels).float().mean()
-        metrics.update(loss=loss.item(), acc=acc.item())
+    best_val_acc = 0.0
+    checkpoint_dir = "./checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
-        if (ep + 1) % 50 == 0:
-            logger.debug(
-                f"  [ep {ep+1}/{n_episodes}]  {metrics.summary()}"
+    print("Starting episodic training of PDFA...\n")
+
+    for epoch in range(config.epochs):
+        model.train()
+        epoch_loss = 0.0
+        epoch_acc = 0.0
+        num_episodes = config.num_episodes_per_epoch if hasattr(config, 'num_episodes_per_epoch') else 100
+
+        pbar = tqdm(range(num_episodes), desc=f"Epoch {epoch+1}/{config.epochs}")
+
+        for _ in pbar:
+            # Sample one episode
+            support_imgs, query_imgs, support_labels, class_names, query_labels = episodic_sampler(
+                train_dataset,
+                n_way=config.n_way,
+                k_shot=config.k_shot,
+                q_query=config.q_query
             )
 
-    return metrics.to_dict()
+            support_imgs = support_imgs.to(device)
+            query_imgs = query_imgs.to(device)
+            support_labels = support_labels.to(device)
+            query_labels = query_labels.to(device)
 
+            # Forward pass with intermediates for L_w
+            logits, X_i, V_bar_i, e_i = model(
+                support_imgs, 
+                query_imgs, 
+                support_labels, 
+                class_names,
+                return_intermediates=True
+            )
 
-@torch.no_grad()
-def validate(
-    model, clip_model, sampler, class_token_dict,
-    device, n_episodes,
-):
-    """Run validation episodes and return mean accuracy."""
-    model.eval()
-    correct, total = 0, 0
+            # Classification loss
+            loss_ce = F.cross_entropy(logits, query_labels)
 
-    for _ in range(n_episodes):
-        s_imgs, q_imgs, q_labels, ep_cls = \
-            sampler.get_episode_tensors(device)
+            # Cross-modal alignment loss
+            loss_w = compute_alignment_loss(X_i, V_bar_i, e_i)
 
-        c_tokens = torch.stack(
-            [class_token_dict[c] for c in ep_cls]
-        ).to(device)
+            # Total loss
+            loss = loss_ce + config.lambda_w * loss_w
 
-        logits, _ = model(clip_model, s_imgs, q_imgs, c_tokens)
-        preds = logits.argmax(dim=1)
-        correct += (preds == q_labels).sum().item()
-        total   += q_labels.size(0)
+            # Backward & update
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-    return correct / total
+            # Metrics
+            acc = accuracy(logits, query_labels)
 
+            epoch_loss += loss.item()
+            epoch_acc += acc
 
-def train(cfg):
-    # ── setup ──────────────────────────────────────────────────────
-    set_seed(cfg.seed)
-    os.makedirs(cfg.save_dir, exist_ok=True)
-    logger = get_logger("train", cfg.log_dir)
-    device = cfg.device if torch.cuda.is_available() else "cpu"
-
-    logger.info(f"{'='*55}")
-    logger.info(f"PDFA Training")
-    logger.info(f"  Dataset  : {cfg.dataset}")
-    logger.info(f"  Backbone : {cfg.backbone}")
-    logger.info(f"  Episode  : {cfg.N_way}-way {cfg.K_shot}-shot")
-    logger.info(f"  Device   : {device}")
-    logger.info(f"{'='*55}")
-
-    # ── CLIP ────────────────────────────────────────────────────────
-    clip_model, _, embed_dim = load_clip(cfg.backbone, device)
-    logger.info(f"CLIP loaded: embed_dim={embed_dim}")
-
-    # ── datasets ────────────────────────────────────────────────────
-    train_set = get_dataset(cfg.dataset, cfg.data_root, "train",
-                            cfg.image_size)
-    val_set   = get_dataset(cfg.dataset, cfg.data_root, "val",
-                            cfg.image_size)
-
-    train_sampler = EpisodeSampler(
-        train_set, cfg.N_way, cfg.K_shot, cfg.Q_query
-    )
-    val_sampler = EpisodeSampler(
-        val_set, cfg.N_way, cfg.K_shot, cfg.Q_query
-    )
-
-    logger.info(
-        f"Train: {len(train_set)} imgs / {train_set.n_classes} cls  |  "
-        f"Val: {len(val_set)} imgs / {val_set.n_classes} cls"
-    )
-
-    # ── class token dictionaries ────────────────────────────────────
-    train_token_dict = build_class_token_dict(
-        train_set.classes,
-        list(range(train_set.n_classes)),
-        device,
-    )
-    val_token_dict = build_class_token_dict(
-        val_set.classes,
-        list(range(val_set.n_classes)),
-        device,
-    )
-
-    # ── build PDFA ──────────────────────────────────────────────────
-    model = PDFA(
-        embed_dim   = embed_dim,
-        proj_dim    = cfg.proj_dim,
-        M           = cfg.M_prompt,
-        N_way       = cfg.N_way,
-        K_shot      = cfg.K_shot,
-        Q_query     = cfg.Q_query,
-        hidden_dim  = cfg.hidden_dim,
-        asgm_heads  = cfg.asgm_heads,
-        asgm_dk     = cfg.asgm_dk,
-        beta        = cfg.beta,
-        lam         = cfg.lam,
-        mlp_hidden  = cfg.mlp_hidden,
-        dropout     = cfg.dropout,
-        prompt_std  = cfg.prompt_std,
-    ).to(device)
-
-    # ── load pre-trained Z_mu ────────────────────────────────────────
-    if cfg.pretrain_ckpt is not None and \
-       os.path.exists(cfg.pretrain_ckpt):
-        ckpt = torch.load(cfg.pretrain_ckpt, map_location=device)
-        model.Z_mu.load_state_dict(ckpt["model_state"])
-        logger.info(f"Z_mu loaded from: {cfg.pretrain_ckpt}")
-    else:
-        logger.warning(
-            "No pretrain_ckpt provided. Z_mu is randomly initialised."
-        )
-    model.Z_mu.freeze()
-    logger.info("Z_mu frozen.")
-
-    print_model_summary(model, logger)
-    param_info = model.count_parameters()
-    logger.info(
-        f"Parameters — trainable: {param_info['trainable']:,}  "
-        f"frozen: {param_info['frozen']:,}"
-    )
-
-    # ── optimizer + scheduler ────────────────────────────────────────
-    optimizer = torch.optim.AdamW(
-        model.get_trainable_params(),
-        lr=cfg.lr,
-        weight_decay=cfg.weight_decay,
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, cfg.epochs
-    )
-
-    start_epoch = 0
-    best_val_acc = 0.0
-
-    # ── optional resume ─────────────────────────────────────────────
-    if cfg.resume is not None and os.path.exists(cfg.resume):
-        ckpt_info = load_checkpoint(
-            cfg.resume, model, optimizer, scheduler, device
-        )
-        start_epoch  = ckpt_info.get("epoch", 0)
-        best_val_acc = ckpt_info.get("best_val_acc", 0.0)
-        logger.info(
-            f"Resumed from epoch {start_epoch}, "
-            f"best_val_acc={best_val_acc*100:.2f}%"
-        )
-
-    # ── training loop ────────────────────────────────────────────────
-    logger.info(f"Starting episodic training for {cfg.epochs} epochs")
-
-    for epoch in range(start_epoch, cfg.epochs):
-
-        train_metrics = train_one_epoch(
-            model, clip_model,
-            train_sampler, train_token_dict,
-            optimizer, device,
-            cfg.n_train_episodes, logger, epoch,
-        )
-
-        val_acc = validate(
-            model, clip_model,
-            val_sampler, val_token_dict,
-            device, cfg.n_val_episodes,
-        )
+            pbar.set_postfix({
+                'Loss': f"{loss.item():.4f}",
+                'CE': f"{loss_ce.item():.4f}",
+                'L_w': f"{loss_w.item():.4f}",
+                'Acc': f"{acc*100:.2f}%"
+            })
 
         scheduler.step()
-        lr_now = scheduler.get_last_lr()[0]
-        is_best = val_acc > best_val_acc
-        if is_best:
-            best_val_acc = val_acc
 
-        logger.info(
-            f"Epoch [{epoch+1:03d}/{cfg.epochs}]  "
-            f"loss={train_metrics['loss']:.4f}  "
-            f"train_acc={train_metrics['acc']*100:.2f}%  "
-            f"val_acc={val_acc*100:.2f}%  "
-            f"best={best_val_acc*100:.2f}%  "
-            f"lr={lr_now:.2e}"
-            + ("  ← best" if is_best else "")
+        avg_loss = epoch_loss / num_episodes
+        avg_acc = epoch_acc / num_episodes
+
+        print(f"Epoch {epoch+1:3d} | Avg Loss: {avg_loss:.4f} | Train Acc: {avg_acc*100:.2f}%")
+
+        # Validation every 10 epochs
+        if (epoch + 1) % 10 == 0 or epoch == config.epochs - 1:
+            val_acc = evaluate(model, val_dataset, device, num_episodes=200)
+            print(f"Validation {config.k_shot}-shot Acc: {val_acc*100:.2f}%")
+
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'val_acc': val_acc,
+                }, os.path.join(checkpoint_dir, "pdfa_best.pth"))
+                print(f"→ Best model saved! Val Acc: {val_acc*100:.2f}%")
+
+    print(f"\nTraining completed. Best validation accuracy: {best_val_acc*100:.2f}%")
+
+
+# ====================== Evaluation Function ======================
+@torch.no_grad()
+def evaluate(model, dataset, device, num_episodes=200):
+    model.eval()
+    total_acc = 0.0
+
+    for _ in range(num_episodes):
+        support_imgs, query_imgs, support_labels, class_names, query_labels = episodic_sampler(
+            dataset,
+            n_way=config.n_way,
+            k_shot=config.k_shot,
+            q_query=config.q_query
         )
 
-        save_checkpoint(
-            {
-                "epoch":         epoch + 1,
-                "model_state":   model.state_dict(),
-                "optimizer_state": optimizer.state_dict(),
-                "scheduler_state": scheduler.state_dict(),
-                "best_val_acc":  best_val_acc,
-                "cfg":           vars(cfg),
-            },
-            save_dir=cfg.save_dir,
-            filename=f"epoch_{epoch+1:03d}.pth",
-            is_best=is_best,
-        )
+        support_imgs = support_imgs.to(device)
+        query_imgs = query_imgs.to(device)
+        support_labels = support_labels.to(device)
+        query_labels = query_labels.to(device)
 
-    logger.info(
-        f"\nTraining complete. "
-        f"Best val acc: {best_val_acc*100:.2f}%"
-    )
+        logits, _, _, _ = model(
+            support_imgs, 
+            query_imgs, 
+            support_labels, 
+            class_names,
+            return_intermediates=True
+        )
+       
+        acc = accuracy(logits, query_labels)
+        total_acc += acc
+
+    return total_acc / num_episodes
 
 
 if __name__ == "__main__":
-    cfg = get_config()
-    train(cfg)
+    train() """
+# train.py
+from matplotlib import pyplot as plt
+import numpy as np
+import torch
+import torch.nn.functional as F
+from tqdm import tqdm
+import os
+import json
+
+from config import config
+from models.pdfa import PDFA
+
+from data.dataset import FewShotDataset, episodic_sampler, get_transforms
+from utils.utils import compute_alignment_loss, accuracy
+@torch.no_grad()
+def visualize_attention_map(model, dataset, device, save_path="attention_map_final.png", num_samples=1):
+    """
+    Visualize and save an attention map at the end of training.
+    Adapts to your PDFA model's intermediates (X_i, V_bar_i, e_i).
+    """
+    model.eval()
+    
+    # Sample one episode
+    support_imgs, query_imgs, support_labels, class_names, query_labels = episodic_sampler(
+        dataset, config.n_way, config.k_shot, config.q_query
+    )
+    
+    support_imgs = support_imgs.to(device)
+    query_imgs = query_imgs.to(device)
+    support_labels = support_labels.to(device)
+    
+    # Forward with intermediates
+    logits, X_i, V_bar_i, e_i = model(
+        support_imgs, query_imgs, support_labels, class_names, return_intermediates=True
+    )
+    
+    # === Example visualization using your alignment intermediates ===
+    # You can replace this section with raw attention weights from your ViT encoder if available
+    # For now, we create a simple heatmap from the alignment loss components (e.g., similarity between X_i and V_bar_i)
+    
+    # Compute a representative "attention-like" map (e.g., cosine similarity or alignment score per patch)
+    # Assuming X_i and V_bar_i have shape [batch, seq_len, dim] or similar
+    if X_i is not None and V_bar_i is not None:
+        # Normalize and compute similarity (example: mean over batch and heads if multi-head)
+        X_norm = F.normalize(X_i.mean(dim=0) if X_i.dim() > 2 else X_i, dim=-1)
+        V_norm = F.normalize(V_bar_i.mean(dim=0) if V_bar_i.dim() > 2 else V_bar_i, dim=-1)
+        
+        attn_scores = torch.matmul(X_norm, V_norm.T)  # similarity matrix
+        attn_map = attn_scores.softmax(dim=-1).mean(dim=0).cpu().numpy()  # average and to numpy
+        
+        # Reshape to 2D if it's patch-based (adjust patch size according to your ViT, e.g., 14x14 for 224/16)
+        if len(attn_map.shape) == 1:
+            patch_size = int(np.sqrt(len(attn_map)))  # assuming square grid
+            if patch_size * patch_size == len(attn_map):
+                attn_map = attn_map.reshape(patch_size, patch_size)
+            else:
+                attn_map = attn_map.reshape(-1, 1)  # fallback
+        
+        # Plot
+        fig, axs = plt.subplots(1, 2, figsize=(12, 6))
+        
+        # Original query image (first one)
+        img_to_show = query_imgs[0].cpu().permute(1, 2, 0).numpy()
+        img_to_show = (img_to_show - img_to_show.min()) / (img_to_show.max() - img_to_show.min() + 1e-8)
+        axs[0].imshow(img_to_show)
+        axs[0].set_title("Query Image (Sample)")
+        axs[0].axis('off')
+        
+        # Attention map
+        im = axs[1].imshow(attn_map, cmap='viridis')
+        axs[1].set_title("Attention / Alignment Map")
+        axs[1].axis('off')
+        fig.colorbar(im, ax=axs[1], fraction=0.046, pad=0.04)
+        
+        plt.suptitle("Final Attention Map Visualization (PDFA)", fontsize=16)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"→ Attention map saved to: {save_path}")
+    else:
+        print("Warning: No suitable intermediates returned for attention visualization.")
+def train():
+    import os
+
+    # Define the absolute path
+    checkpoint_dir = "/workdir1.8t/fei27/CGT/APDFA/checkpoints"
+
+    # Create the directory if it doesn't exist
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    print(f"Checkpoint directory ready at: {checkpoint_dir}")
+    device = torch.device(config.device if torch.cuda.is_available() else "cpu")
+    print(f"Training PDFA on device: {device}")
+
+    # ==================== Datasets & Transforms ====================
+    # Mandatory 224 for CLIP ViT architectures
+    
+    # Example usage
+    transform = get_transforms(image_size=224)
+
+    train_dataset = FewShotDataset(
+        root='/workdir1.8t/fei27/CGT/APDFA/data/miniImageNet',
+        split='train',
+        transform=transform
+    )
+
+    # For testing
+    test_dataset = FewShotDataset(
+        root='/workdir1.8t/fei27/CGT/APDFA/data/miniImageNet',
+        split='test',
+        transform=transform   # usually no RandomFlip for test, but ok for now
+    )
+
+    """ transform = get_transforms(dataset_name="miniImageNet", image_size=224)
+
+    train_dataset = FewShotDataset(
+        root=config.data_root,
+        dataset_name="miniImageNet",
+        split="train",
+        transform=transform
+    )
+
+    val_dataset = FewShotDataset(
+        root=config.data_root,
+        dataset_name="miniImageNet",
+        split="val",           # or "test"
+        transform=transform
+    ) """
+
+    # ==================== Model & Optimizer ====================
+    model = PDFA(config).to(device)
+    
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=config.lr,
+        weight_decay=config.weight_decay
+    )
+    
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.epochs)
+
+    # Metrics History for Journal Visualization
+    history = {
+        'train_loss': [],
+        'train_acc': [],
+        'val_acc': [],
+        'loss_ce': [],
+        'loss_w': []
+    }
+
+    best_val_acc = 0.0
+    checkpoint_dir = "./checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    print(f"Starting episodic training: {config.n_way}-way {config.k_shot}-shot\n")
+
+    for epoch in range(config.epochs):
+        model.train()
+        epoch_loss, epoch_acc = 0.0, 0.0
+        epoch_ce, epoch_lw = 0.0, 0.0
+        
+        num_episodes = config.num_episodes_per_epoch if hasattr(config, 'num_episodes_per_epoch') else 100
+        pbar = tqdm(range(num_episodes), desc=f"Epoch {epoch+1}/{config.epochs}")
+
+        for _ in pbar:
+            # Sample Episode
+            support_imgs, query_imgs, support_labels, class_names, query_labels = episodic_sampler(
+                train_dataset,
+                n_way=config.n_way,
+                k_shot=config.k_shot,
+                q_query=config.q_query
+            )
+
+            support_imgs, query_imgs = support_imgs.to(device), query_imgs.to(device)
+            support_labels, query_labels = support_labels.to(device), query_labels.to(device)
+
+            # Forward pass
+            logits, X_i, V_bar_i, e_i = model(
+                support_imgs, query_imgs, support_labels, class_names, return_intermediates=True
+            )
+
+            # Dual-Loss Computation
+            loss_ce = F.cross_entropy(logits, query_labels)
+            loss_w = compute_alignment_loss(X_i, V_bar_i, e_i)
+            loss = loss_ce + config.lambda_w * loss_w
+
+            # Optimization
+            optimizer.zero_grad()
+            loss.backward()
+            # Gradient clipping for stability in multi-modal fusion
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            # Batch Metrics
+            acc = accuracy(logits, query_labels)
+            epoch_loss += loss.item()
+            epoch_acc += acc
+            epoch_ce += loss_ce.item()
+            epoch_lw += loss_w.item()
+
+            pbar.set_postfix({'L': f"{loss.item():.3f}", 'Acc': f"{acc*100:.1f}%"})
+
+        scheduler.step()
+
+        # Log Epoch Metrics
+        avg_loss = epoch_loss / num_episodes
+        avg_acc = epoch_acc / num_episodes
+        history['train_loss'].append(avg_loss)
+        history['train_acc'].append(avg_acc)
+        history['loss_ce'].append(epoch_ce / num_episodes)
+        history['loss_w'].append(epoch_lw / num_episodes)
+
+        print(f"Epoch {epoch+1:3d} | Loss: {avg_loss:.4f} | Train Acc: {avg_acc*100:.2f}%")
+
+        # Validation logic
+        # Validation logic (inside your epoch loop)
+        if (epoch + 1) % 5 == 0 or epoch == config.epochs - 1:
+            val_acc = evaluate(model, test_dataset, device, num_episodes=200)
+            history['val_acc'].append({'epoch': epoch + 1, 'acc': val_acc})
+            print(f"→ Validation Acc: {val_acc*100:.2f}%")
+
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                
+                # 1. Define the absolute path clearly
+                checkpoint_dir = "/workdir1.8t/fei27/CGT/APDFA/checkpoints"
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                save_path = os.path.join(checkpoint_dir, "pdfa_best.pth")
+                
+                # 2. Save the full experimental state
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'history': history,    # Essential for your convergence plots
+                    'val_acc': val_acc,
+                    'config': vars(config) if not isinstance(config, dict) else config, # Hyperparameter tracking
+                }, save_path)
+                
+                print(f"→ Best Checkpoint Saved at: {save_path}")
+
+    # 3. Final safety save for the history JSON (after the epoch loop ends)
+    history_json_path = os.path.join(checkpoint_dir, "history.json")
+    with open(history_json_path, "w") as f:
+        json.dump(history, f, indent=4) # indent=4 makes it readable for reviewers
+    print(f"→ Training history exported to {history_json_path}")
+    print("\nGenerating final attention map visualization...")
+    
+    # Use absolute checkpoint dir for consistency
+    checkpoint_dir = "/workdir1.8t/fei27/CGT/APDFA/checkpoints"
+    attn_save_path = os.path.join(checkpoint_dir, "attention_map_final.png")
+    
+    visualize_attention_map(model, test_dataset, device, save_path=attn_save_path)
+    
+    print("Training completed successfully!")
+
+@torch.no_grad()
+def evaluate(model, dataset, device, num_episodes=200):
+    model.eval()
+    total_acc = 0.0
+    for _ in range(num_episodes):
+        support_imgs, query_imgs, support_labels, class_names, query_labels = episodic_sampler(
+            dataset, config.n_way, config.k_shot, config.q_query
+        )
+        logits = model(support_imgs.to(device), query_imgs.to(device), 
+                       support_labels.to(device), class_names)
+        total_acc += accuracy(logits, query_labels)
+    return total_acc / num_episodes
+
+if __name__ == "__main__":
+    train()
