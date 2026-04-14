@@ -1,5 +1,4 @@
-# Prompt-Driven Feature Adaptation (PDFA)
-## Vision–Language Few-Shot Learning
+# Adaptive Cross-Modal Alignment via Symmetric Prompts for Few-Shot Vision–Language Learning (PDFA)
 
 ---
 
