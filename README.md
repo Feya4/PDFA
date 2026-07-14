@@ -39,8 +39,8 @@ ACAS-PT/
 ## Installation
 
 ```bash
-git clone https://github.com/Feya4/ACAS-PT.git
-cd ACAS-PT
+git clone https://github.com/Feya4/PDFA.git
+cd PDFA
 pip install -r requirements.txt
 ```
 
