@@ -1,7 +1,6 @@
 # Adaptive Cross-Modal Alignment via Symmetric Prompts for Few-Shot Vision–Language Learning (PDFA)
 
 ---
-<img width="1783" height="1075" alt="PDFA-4" src="https://github.com/user-attachments/assets/6f98090c-2c7d-4dec-b758-7c1928535472" />
 
 
 ## Project Structure
