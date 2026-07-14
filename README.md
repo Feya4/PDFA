@@ -1,11 +1,11 @@
 # ACAS-PT: Adaptive Cross-Modal Alignment via Symmetric Prompt Tuning for Few-Shot Vision–Language Learning 
 
+
+**Abstract**
+ACAS-PT addresses a core flaw in vision-language few-shot learning: query-side semantic blindness, where query images are processed without cross-modal context. By introducing Symmetric Prompt Tuning, ACAS-PT applies identical text-conditioned feature transformations to both support and query samples, entirely eliminating the training-inference distribution gap. Backed by a Semantic-Aware Class-Embedding Learner and an Adaptive Similarity Guided Module (ASGM), it outperforms 16 state-of-the-art methods across 4 benchmark datasets.
 Access the paper on:
 * **Springer:** [https://link.springer.com/article/10.1007/s44443-026-00952-8](https://link.springer.com/article/10.1007/s44443-026-00952-8)
 * **DOI:** [10.1007/s44443-026-00952-8](https://doi.org/10.1007/s44443-026-00952-8)
-
-**Abstract**
-ACAS-PT addresses a core flaw in vision-language few-shot learning: query-side semantic blindness, where query images are processed without cross-modal context. By introducing Symmetric Prompt Tuning, ACAS-PT applies identical text-conditioned feature transformations to both support and query samples, entirely eliminating the training-inference distribution gap. Backed by a Semantic-Aware Class-Embedding Learner and an Adaptive Similarity Guided Module (ASGM), it outperforms 16 state-of-the-art methods across 4 benchmark datasets. 
 
 <img width="822" height="652" alt="modelcopy" src="https://github.com/user-attachments/assets/6f30f57e-57dd-4104-b23d-e1fd8bd55420" />
 
