@@ -9,7 +9,7 @@ Few-shot learning with vision-language models suffers from a fundamental structu
 ## Project Structure
 
 ```
-pdfa/
+ACAS-PT/
 ├── config.py                      # All hyperparameters and CLI arguments
 ├── pretrain.py                    # Stage 1: pre-train Z_mu on base classes
 ├── train.py                       # Stage 2: episodic training of PDFA
@@ -39,8 +39,8 @@ pdfa/
 ## Installation
 
 ```bash
-git clone https://github.com/Feya4/PDFA.git
-cd PDFA
+git clone https://github.com/Feya4/ACAS-PT.git
+cd ACAS-PT
 pip install -r requirements.txt
 ```
 
