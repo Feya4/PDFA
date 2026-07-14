@@ -1,6 +1,8 @@
 # Adaptive Cross-Modal Alignment via Symmetric Prompts for Few-Shot Vision–Language Learning (PDFA)
 
 ---
+<img width="1783" height="1075" alt="PDFA-4" src="https://github.com/user-attachments/assets/6f98090c-2c7d-4dec-b758-7c1928535472" />
+
 
 ## Project Structure
 
@@ -144,10 +146,12 @@ python evaluate.py \
 ## Citation
 
 ```bibtex
-@article{pdfa2025,
-  title  = {Prompt-Driven Feature Adaptation for
-             Vision-Language Few-Shot Learning},
-  author = {Feidu Akmel, Xun Gong},
-  year   = {2026}
+@article{Akmel2026,
+  author    = {Akmel, F. and Gong, X. and Hadabi, A. and others},
+  title     = {Adaptive cross-modal alignment via symmetric prompt tuning for few-shot vision–language learning},
+  journal   = {Journal of King Saud University - Computer and Information Sciences},
+  year      = {2026},
+  doi       = {10.1007/s44443-026-00952-8},
+  url       = {https://doi.org/10.1007/s44443-026-00952-8}
 }
 ```
