@@ -1,6 +1,9 @@
-# Adaptive Cross-Modal Alignment via Symmetric Prompts for Few-Shot Vision–Language Learning (PDFA)
+# ACAS-PT: Adaptive Cross-Modal Alignment via Symmetric Prompts for Few-Shot Vision–Language Learning 
 
+**Abstract**
+Few-shot learning with vision-language models suffers from a fundamental structural limitation: support and query samples are processed through independent and asymmetric encoding pipelines. This causes query-side semantic blindness, where the model lacks rich cross-modal interactions during query encoding. Consequently, it weakens vision-language alignment and creates a training-inference distribution gap, degrading generalization to novel categories. Existing prompt-based methods inherit this asymmetry and thus cannot leverage text-conditioned semantic context on the query side at inference time. To address this limitation, we propose an Adaptive Cross-Modal Alignment via Symmetric Prompt Tuning for Few-Shot Vision–Language Learning (ACAS-PT) a unified framework that resolves this issue via symmetric prompt tuning. ACAS-PT applies identical prompt-guided, text-conditioned feature transformations to both support and query samples in a shared multimodal space, eliminating the distribution gap by design. Specifically, we propose two modules. First, a Semantic-Aware Class-Embedding Learner transforms prompt-conditioned CLIP class embeddings into class-specific semantic vectors used to modulate both support and query visual features via FiLM-based affine transformation, ensuring that query samples receive the same class-specific semantic grounding as support prototypes at inference. Second, an Adaptive Similarity Guided Module (ASGM) replaces fragile equal-weight prototype averaging with learnable instance-weighted centroid aggregation and a per-class-pair cross-modal alignment matrix that gates classification scores by within-class semantic-visual alignment confidence, yielding robust prototype estimates even under extreme label scarcity. Extensive experiments on four benchmark datasets show ACAS-PT outperforms 16 state-of-the-art methods, with symmetric processing alone yielding up to a +2.5% improvement in 5-shot accuracy. These results highlight query-side semantic blindness as a critical bottleneck in vision-language few-shot learning.
 ---
+<img width="822" height="652" alt="modelcopy" src="https://github.com/user-attachments/assets/6f30f57e-57dd-4104-b23d-e1fd8bd55420" />
 
 
 ## Project Structure
@@ -135,10 +138,10 @@ python evaluate.py \
 
 ## Results
 
-| Method | Backbone | mini 1s | mini 5s | tiered 1s | tiered 5s |
-|--------|----------|---------|---------|-----------|-----------|
-| PDFA (ours) | ResNet-12 | 72.16 | 83.79 | 72.34 | 85.97 |
-| PDFA+CLIP (ours) | ViT-B/16 | **84.84** | **93.04** | **88.23** | **94.25** |
+<img width="736" height="440" alt="table1" src="https://github.com/user-attachments/assets/c4e68742-f14e-4461-a76d-6621a358b073" />
+<img width="1783" height="1075" alt="PDFA-4" src="https://github.com/user-attachments/assets/c9488123-b8f6-47b9-87a7-cd2a81824129" />
+<img width="2026" height="2547" alt="attention_visualization_1shot" src="https://github.com/user-attachments/assets/db42d7fc-5268-4789-a69b-8c49ccea5a9d" />
+
 
 ---
 
@@ -154,3 +157,4 @@ python evaluate.py \
   url       = {https://doi.org/10.1007/s44443-026-00952-8}
 }
 ```
+
